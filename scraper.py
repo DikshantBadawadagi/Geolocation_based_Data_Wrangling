@@ -40,25 +40,87 @@ def save_page_source(url, filename):
     except Exception as e:
         logging.error(f"Error saving page source for {url}: {str(e)}")
 
-def scrape_usc_housing():
-    url = "https://housing.usc.edu"
+def scrape_usc_housing_buildings():
     buildings = []
+    base_url = "https://housing.usc.edu"
+    home_url = base_url
+    
     try:
-        logging.info(f"Scraping {url}")
-        driver.get(url)
-        save_page_source(url, "housing_page.html")
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".housing-unit"))  # Placeholder
-        )
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        for item in soup.select(".housing-unit"):
-            name = item.select_one(".building-name").text.strip() if item.select_one(".building-name") else "Unknown"
-            address = item.select_one(".building-address").text.strip() if item.select_one(".building-address") else "Unknown"
-            buildings.append({"name": name, "address": address, "source": "USC Housing"})
+        logging.info(f"Scraping housing options from {home_url}")
+        response = requests.get(home_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Find building links in dropdown
+        building_links = []
+        dropdown = soup.select_one(".dropdown-menu.fullwidth-menu")
+        if dropdown:
+            for link in dropdown.select("a[href*='/index.php/buildings/']"):
+                href = link.get("href")
+                if href.startswith("/"):
+                    href = base_url + href
+                building_name = link.text.strip() or href.split("/")[-2].replace("-", " ").title()
+                building_links.append({"name": building_name, "url": href})
+        
+        # Remove duplicates
+        building_links = [dict(t) for t in {tuple(d.items()) for d in building_links}]
+        
+        # Scrape each building page
+        for building in building_links:
+            try:
+                logging.info(f"Scraping building: {building['name']} at {building['url']}")
+                response = requests.get(building["url"], headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                })
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                # Extract address
+                address_elem = soup.select_one(".building-address p")
+                address = address_elem.text.strip().replace("\n", ", ") if address_elem else "Unknown"
+                
+                buildings.append({
+                    "name": building["name"],
+                    "address": address,
+                    "source": "USC Housing"
+                })
+            except Exception as e:
+                logging.error(f"Error scraping {building['name']}: {str(e)}")
+                buildings.append({
+                    "name": building["name"],
+                    "address": "Unknown",
+                    "source": "USC Housing"
+                })
+        
+        # Try Greek housing page
+        greek_url = f"{base_url}/index.php/greek-life"
+        try:
+            logging.info(f"Scraping Greek housing from {greek_url}")
+            response = requests.get(greek_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            })
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            for item in soup.select(".greek-house"):  # Placeholder selector
+                name = item.select_one(".chapter-name").text.strip() if item.select_one(".chapter-name") else "Unknown"
+                address = item.select_one(".building-address p").text.strip().replace("\n", ", ") if item.select_one(".building-address p") else "Unknown"
+                buildings.append({
+                    "name": name,
+                    "address": address,
+                    "source": "USC Greek Housing"
+                })
+        except Exception as e:
+            logging.error(f"Error scraping Greek housing: {str(e)}")
+        
         if not buildings:
-            logging.warning("No buildings found on USC Housing page. Check selectors or page content.")
+            logging.warning("No buildings found on USC Housing pages.")
+        
     except Exception as e:
-        logging.error(f"Error scraping USC Housing: {str(e)}")
+        logging.error(f"Error scraping housing options: {str(e)}")
+    
     return buildings
 
 def scrape_usc_village():
@@ -101,14 +163,13 @@ def scrape_greek_houses():
             for link in links:
                 chapter_name = link.text.strip()
                 chapter_url = link.get("href")
-                # Filter for valid chapter URLs
                 if (chapter_name and chapter_url and 
                     "/prospective-students/chapters/" in chapter_url and
                     not chapter_url.startswith("mailto:") and
                     chapter_url.startswith("http")):
                     chapter_links.append({"name": chapter_name, "url": chapter_url})
         
-        # Visit each chapter page to confirm existence (no address extraction)
+        # Visit each chapter page
         for chapter in chapter_links:
             retries = 3
             for attempt in range(retries):
@@ -118,17 +179,17 @@ def scrape_greek_houses():
                     safe_name = re.sub(r'[^\w\-_\.]', '_', chapter['name'])[:50]
                     save_page_source(chapter['url'], f"greek_{safe_name}.html")
                     
-                    # Wait for content to load
+                    # Wait for content
                     WebDriverWait(driver, 20).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, ".fl-rich-text"))
                     )
                     
                     buildings.append({
                         "name": chapter['name'],
-                        "address": "Unknown",  # Addresses not available on chapter pages
+                        "address": "Unknown",
                         "source": "Greek Life"
                     })
-                    break  # Exit retry loop on success
+                    break
                 
                 except (TimeoutException, WebDriverException) as e:
                     logging.error(f"Attempt {attempt+1} failed for {chapter['name']}: {str(e)}")
@@ -140,12 +201,11 @@ def scrape_greek_houses():
                             "source": "Greek Life"
                         })
                         problematic_urls.append(chapter['url'])
-                    time.sleep(3)  # Wait before retry
+                    time.sleep(3)
         
         if not buildings:
-            logging.warning("No Greek houses found. Check selectors or page content.")
+            logging.warning("No Greek houses found.")
         
-        # Save problematic URLs
         if problematic_urls:
             with open("data/raw/problematic_urls.txt", "w") as f:
                 f.write("\n".join(problematic_urls))
@@ -162,35 +222,68 @@ def scrape_usc_map():
     try:
         logging.info(f"Scraping {url}")
         driver.get(url)
-        save_page_source(url, "map_page.html")
+        save_page_source(url, "greek_page.html")
         
-        # Wait for map markers to load
-        WebDriverWait(driver, 20).until(
+        # Wait for map markers
+        WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div[aria-label*='Open Location']"))
         )
         
-        # Find and click markers to access pop-ups
+        # Find markers
         markers = driver.find_elements(By.CSS_SELECTOR, "div[aria-label*='Open Location']")
         for marker in markers:
             try:
                 name = marker.get_attribute("aria-label").replace("Open Location: ", "").strip()
                 if name:
-                    # Click marker to open pop-up
+                    # Click marker
                     driver.execute_script("arguments[0].click();", marker)
-                    time.sleep(2)  # Wait for pop-up
-                    # Try to extract address from pop-up (adjust selector after inspection)
-                    popup = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, ".popup-content"))  # Placeholder
+                    time.sleep(5)
+                    
+                    # Try pop-up
+                    popup = WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".bln-modal"))
                     )
                     soup = BeautifulSoup(popup.get_attribute("innerHTML"), "html.parser")
-                    address_elem = soup.select_one("p.address")  # Placeholder
+                    
+                    # Try address selectors
+                    address_elem = (soup.select_one("p.address") or
+                                  soup.select_one(".balloon-details p") or
+                                  soup.select_one(".scroll-wrapper p"))
                     address = address_elem.text.strip() if address_elem else "Unknown"
+                    
+                    # Try directions
+                    if address == "Unknown":
+                        try:
+                            directions_btn = driver.find_element(By.ID, "openDirections")
+                            directions_btn.click()
+                            time.sleep(3)
+                            popup = WebDriverWait(driver, 10).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, ".bln-modal"))
+                            )
+                            soup = BeautifulSoup(popup.get_attribute("innerHTML"), "html.parser")
+                            address_elem = soup.select_one("p.address") or soup.select_one(".scroll-wrapper p")
+                            address = address_elem.text.strip() if address_elem else "Unknown"
+                        except:
+                            pass
+                    
+                    # Validate address
+                    if address != "Unknown" and not re.match(r'^\d+.*,\s*Los Angeles,\s*CA\s*\d{5}', address):
+                        address = "Unknown"
                     
                     buildings.append({
                         "name": name,
                         "address": address,
                         "source": "USC Map"
                     })
+                    
+                    # Close pop-up
+                    try:
+                        close_btn = driver.find_element(By.ID, "close-balloon-details")
+                        close_btn.click()
+                        time.sleep(1)
+                    except:
+                        pass
+                
             except Exception as e:
                 logging.error(f"Error processing map marker {name}: {str(e)}")
                 buildings.append({
@@ -200,7 +293,7 @@ def scrape_usc_map():
                 })
         
         if not buildings:
-            logging.warning("No buildings found on USC Map. Check selectors or page content.")
+            logging.warning("No buildings found on USC Map.")
         
     except Exception as e:
         logging.error(f"Error scraping USC Map: {str(e)}")
@@ -210,27 +303,30 @@ def scrape_usc_map():
 def scrape_osm_buildings():
     buildings = []
     try:
-        logging.info("Scraping OSM buildings for USC Greek Row")
-        # Expanded bounding box for 28th/29th Streets (Greek Row)
-        north, south, east, west = 34.029, 34.017, -118.277, -118.293
-        tags = {"building": True}
-        gdf = ox.features_from_bbox(north, south, east, west, tags=tags)
+        logging.info("Scraping OSM buildings for USC and Greek Row")
+        # Bounding box for USC campus and Greek Row
+        north, south, east, west = 34.031, 34.015, -118.275, -118.295
+        tags = {
+            "building": True,
+            "destination": ["fraternity", "sorority"]
+        }
+        # Corrected call to features_from_bbox
+        gdf = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=tags)
         for _, row in gdf.iterrows():
             name = row.get("name", "Unknown")
             street = row.get("addr:street", "")
             city = row.get("addr:city", "Los Angeles")
-            postcode = row.get("addr:postcode", "90007")  # Greek Row zip
+            postcode = row.get("addr:postcode", "90007")
             housenumber = row.get("addr:housenumber", "")
             address = f"{housenumber} {street}, {city}, CA {postcode}".strip(", ")
-            # Only include if address is reasonably complete
-            if street and housenumber:
+            if street:
                 buildings.append({
                     "name": name,
-                    "address": address,
+                    "address": address if housenumber else f"{street}, {city}, CA {postcode}",
                     "source": "OpenStreetMap"
                 })
         if not buildings:
-            logging.warning("No complete building addresses found in OSM data for Greek Row.")
+            logging.warning("No buildings found in OSM data for USC/Greek Row.")
     except Exception as e:
         logging.error(f"Error scraping OSM buildings: {str(e)}")
     return buildings
@@ -242,15 +338,15 @@ def save_raw_data(data, filename="raw_buildings.csv"):
     logging.info(f"Saved raw data to data/raw/{filename}")
 
 def main():
-    # Scrape data from all sources
-    # housing_data = scrape_usc_housing()  # Disabled due to 503 error
+    # Scrape data
+    housing_data = scrape_usc_housing_buildings()
     village_data = scrape_usc_village()
     greek_data = scrape_greek_houses()
     map_data = scrape_usc_map()
     osm_data = scrape_osm_buildings()
     
     # Combine data
-    all_data = village_data + greek_data + map_data + osm_data
+    all_data = housing_data + village_data + greek_data + map_data + osm_data
     
     # Save raw data
     save_raw_data(all_data)

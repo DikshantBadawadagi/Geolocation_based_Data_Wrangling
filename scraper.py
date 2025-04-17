@@ -14,6 +14,12 @@ from dotenv import load_dotenv
 import logging
 import time
 import re
+import warnings
+from shapely.errors import ShapelyDeprecationWarning
+
+# Suppress Shapely warnings
+warnings.filterwarnings("ignore", category=ShapelyDeprecationWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,6 +40,7 @@ def save_page_source(url, filename):
         driver.get(url)
         time.sleep(5)  # Wait for page to load
         safe_filename = re.sub(r'[^\w\-_\.]', '_', filename)[:100]  # Sanitize filename
+        os.makedirs("data/raw", exist_ok=True)
         with open(f"data/raw/{safe_filename}", "w", encoding="utf-8") as f:
             f.write(driver.page_source)
         logging.info(f"Saved page source to data/raw/{safe_filename}")
@@ -222,7 +229,7 @@ def scrape_usc_map():
     try:
         logging.info(f"Scraping {url}")
         driver.get(url)
-        save_page_source(url, "greek_page.html")
+        save_page_source(url, "map_page.html")  # Fixed filename
         
         # Wait for map markers
         WebDriverWait(driver, 30).until(
@@ -306,29 +313,79 @@ def scrape_osm_buildings():
         logging.info("Scraping OSM buildings for USC and Greek Row")
         # Bounding box for USC campus and Greek Row
         north, south, east, west = 34.031, 34.015, -118.275, -118.295
-        tags = {
-            "building": True,
-            "destination": ["fraternity", "sorority"]
-        }
-        # Corrected call to features_from_bbox
-        gdf = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=tags)
+        # Broader tags to include all buildings and university-related features
+        tags = {"building": True}
+        
+        # Fetch OSM features
+        try:
+            gdf = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=tags)
+            logging.info(f"Retrieved {len(gdf)} OSM features")
+        except Exception as e:
+            logging.error(f"Error fetching OSM features: {str(e)}")
+            return buildings
+        
+        # Process each feature
         for _, row in gdf.iterrows():
-            name = row.get("name", "Unknown")
-            street = row.get("addr:street", "")
-            city = row.get("addr:city", "Los Angeles")
-            postcode = row.get("addr:postcode", "90007")
-            housenumber = row.get("addr:housenumber", "")
-            address = f"{housenumber} {street}, {city}, CA {postcode}".strip(", ")
-            if street:
-                buildings.append({
-                    "name": name,
-                    "address": address if housenumber else f"{street}, {city}, CA {postcode}",
-                    "source": "OpenStreetMap"
-                })
+            try:
+                name = row.get("name", "Unknown")
+                street = row.get("addr:street", "")
+                city = row.get("addr:city", "Los Angeles")
+                postcode = row.get("addr:postcode", "90007")  # Default to common USC zip
+                housenumber = row.get("addr:housenumber", "")
+                
+                # Construct address
+                address = f"{housenumber} {street}, {city}, CA {postcode}".strip(", ")
+                if not street or not housenumber:
+                    address = "Unknown"
+                
+                # Include only if name or address is meaningful
+                if name != "Unknown" or address != "Unknown":
+                    buildings.append({
+                        "name": name,
+                        "address": address,
+                        "source": "OpenStreetMap"
+                    })
+            except Exception as e:
+                logging.error(f"Error processing OSM feature {row.get('name', 'Unknown')}: {str(e)}")
+                continue
+        
+        # Try university-specific features
+        uni_tags = {"amenity": "university"}
+        try:
+            gdf_uni = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=uni_tags)
+            logging.info(f"Retrieved {len(gdf_uni)} university OSM features")
+            for _, row in gdf_uni.iterrows():
+                try:
+                    name = row.get("name", "Unknown")
+                    street = row.get("addr:street", "")
+                    city = row.get("addr:city", "Los Angeles")
+                    postcode = row.get("addr:postcode", "90007")
+                    housenumber = row.get("addr:housenumber", "")
+                    
+                    address = f"{housenumber} {street}, {city}, CA {postcode}".strip(", ")
+                    if not street or not housenumber:
+                        address = "Unknown"
+                    
+                    if name != "Unknown" or address != "Unknown":
+                        buildings.append({
+                            "name": name,
+                            "address": address,
+                            "source": "OpenStreetMap"
+                        })
+                except Exception as e:
+                    logging.error(f"Error processing university OSM feature {row.get('name', 'Unknown')}: {str(e)}")
+                    continue
+        except Exception as e:
+            logging.error(f"Error fetching university OSM features: {str(e)}")
+        
         if not buildings:
-            logging.warning("No buildings found in OSM data for USC/Greek Row.")
+            logging.warning("No valid buildings found in OSM data for USC/Greek Row.")
+        else:
+            logging.info(f"Collected {len(buildings)} OSM buildings")
+        
     except Exception as e:
         logging.error(f"Error scraping OSM buildings: {str(e)}")
+    
     return buildings
 
 def save_raw_data(data, filename="raw_buildings.csv"):

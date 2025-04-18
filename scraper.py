@@ -220,25 +220,44 @@ def scrape_usc_map():
                     popup = WebDriverWait(driver, 10).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, ".bln-modal"))
                     )
-                    soup = BeautifulSoup(popup.get_attribute("innerHTML"), "html.parser")
+                    popup_html = popup.get_attribute("innerHTML")
+                    logging.info(f"Pop-up HTML for {name}: {popup_html[:200]}...")
+                    soup = BeautifulSoup(popup_html, "html.parser")
+                    # Broaden address selectors
                     address_elem = (soup.select_one("p.address") or
+                                   soup.select_one("div.balloon-address") or
                                    soup.select_one(".balloon-details p") or
-                                   soup.select_one(".scroll-wrapper p"))
+                                   soup.select_one(".scroll-wrapper p") or
+                                   soup.select_one("p") or
+                                   soup.select_one("span"))
                     address = address_elem.text.strip() if address_elem else "Unknown"
-                    if address == "Unknown":
+                    logging.info(f"Initial address for {name}: {address}")
+                    if address == "Unknown" or not address:
                         try:
-                            directions_btn = driver.find_element(By.ID, "openDirections")
-                            directions_btn.click()
+                            # Try Directions button or link
+                            directions_btn = (driver.find_element(By.ID, "openDirections") or
+                                            driver.find_element(By.CSS_SELECTOR, "a[href*='directions']") or
+                                            driver.find_element(By.CSS_SELECTOR, "button[data-action='directions']"))
+                            driver.execute_script("arguments[0].click();", directions_btn)
                             time.sleep(2)
                             popup = WebDriverWait(driver, 5).until(
                                 EC.presence_of_element_located((By.CSS_SELECTOR, ".bln-modal"))
                             )
-                            soup = BeautifulSoup(popup.get_attribute("innerHTML"), "html.parser")
-                            address_elem = soup.select_one("p.address") or soup.select_one(".scroll-wrapper p")
+                            popup_html = popup.get_attribute("innerHTML")
+                            logging.info(f"Directions pop-up HTML for {name}: {popup_html[:200]}...")
+                            soup = BeautifulSoup(popup_html, "html.parser")
+                            address_elem = (soup.select_one("p.address") or
+                                           soup.select_one("div.balloon-address") or
+                                           soup.select_one(".scroll-wrapper p") or
+                                           soup.select_one("p") or
+                                           soup.select_one("span"))
                             address = address_elem.text.strip() if address_elem else "Unknown"
+                            logging.info(f"Directions address for {name}: {address}")
                         except:
-                            pass
-                    if address != "Unknown" and not re.match(r'^\d+.*,\s*Los Angeles,\s*CA\s*\d{5}', address):
+                            logging.info(f"No Directions button for {name}")
+                    # Relaxed regex for address validation
+                    if address != "Unknown" and not re.match(r'^\d+.*,\s*Los Angeles\s*,?\s*CA\s*\d{5}', address, re.IGNORECASE):
+                        logging.warning(f"Invalid address format for {name}: {address}")
                         address = "Unknown"
                     buildings.append({
                         "name": name,
@@ -247,10 +266,10 @@ def scrape_usc_map():
                     })
                     try:
                         close_btn = driver.find_element(By.ID, "close-balloon-details")
-                        close_btn.click()
+                        driver.execute_script("arguments[0].click();", close_btn)
                         time.sleep(1)
                     except:
-                        pass
+                        logging.info(f"No close button for {name}")
             except Exception as e:
                 logging.error(f"Error processing map marker {i+1} ({name}): {str(e)}")
                 buildings.append({
@@ -267,13 +286,13 @@ def scrape_usc_map():
 def scrape_osm_buildings():
     buildings = []
     try:
-        logging.info("Scraping OSM buildings for USC and Greek Row")
-        north, south, east, west = 34.035, 34.010, -118.270, -118.300
+        logging.info("Scraping OSM buildings for USC")
+        place = "University of Southern California, Los Angeles, CA"
         tags = {"building": True}
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                gdf = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=tags)
+                gdf = ox.features_from_place(place, tags=tags)
                 logging.info(f"Retrieved {len(gdf)} OSM building features")
                 logging.info(f"OSM columns: {list(gdf.columns)}")
                 logging.info(f"OSM sample: {gdf[['name', 'addr:street', 'addr:housenumber']].head().to_dict()}")
@@ -292,8 +311,8 @@ def scrape_osm_buildings():
                 postcode = row.get("addr:postcode", "90007")
                 housenumber = row.get("addr:housenumber", "")
                 address = f"{housenumber} {street}, {city}, CA {postcode}".strip(", ")
-                # Include buildings with valid names even if address is incomplete
-                if name != "Unknown" or (street and housenumber):
+                # Include all named buildings
+                if name != "Unknown":
                     buildings.append({
                         "name": name,
                         "address": address if street and housenumber else "Unknown",
@@ -305,7 +324,7 @@ def scrape_osm_buildings():
         uni_tags = {"amenity": "university"}
         for attempt in range(max_retries):
             try:
-                gdf_uni = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=uni_tags)
+                gdf_uni = ox.features_from_place(place, tags=uni_tags)
                 logging.info(f"Retrieved {len(gdf_uni)} OSM university features")
                 logging.info(f"University OSM columns: {list(gdf_uni.columns)}")
                 logging.info(f"University OSM sample: {gdf_uni[['name', 'addr:street', 'addr:housenumber']].head().to_dict()}")
@@ -324,7 +343,7 @@ def scrape_osm_buildings():
                 postcode = row.get("addr:postcode", "90007")
                 housenumber = row.get("addr:housenumber", "")
                 address = f"{housenumber} {street}, {city}, CA {postcode}".strip(", ")
-                if name != "Unknown" or (street and housenumber):
+                if name != "Unknown":
                     buildings.append({
                         "name": name,
                         "address": address if street and housenumber else "Unknown",
@@ -334,7 +353,7 @@ def scrape_osm_buildings():
                 logging.error(f"Error processing OSM university feature {row.get('name', 'Unknown')}: {str(e)}")
                 continue
         if not buildings:
-            logging.warning("No valid buildings found in OSM data for USC/Greek Row.")
+            logging.warning("No valid buildings found in OSM data for USC.")
         else:
             logging.info(f"Collected {len(buildings)} OSM buildings")
     except Exception as e:
